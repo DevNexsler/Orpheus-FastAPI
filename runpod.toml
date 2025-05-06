@@ -1,0 +1,53 @@
+# RunPod Project Configuration for Orpheus-FastAPI TTS Server
+
+name = "orpheus-fastapi-tts"
+
+[project]
+uuid = "orpheus-fastapi-tts-uuid" # Consider generating a unique UUID if needed
+# base_image = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel" # Example base, will be defined in Dockerfile
+gpu_types = [
+    "NVIDIA RTX A4000",
+    "NVIDIA RTX A4500",
+    "NVIDIA RTX A5000",
+    "NVIDIA GeForce RTX 3090",
+    "NVIDIA GeForce RTX 4090",
+    "NVIDIA RTX A6000",
+    "NVIDIA A100 80GB PCIe",
+]
+gpu_count = 1
+volume_mount_path = "/runpod-volume" # Optional: define if persistent volume is needed
+ports = "5005/http, 8000/http, 22/tcp" # Orpheus TTS, RunPod health/API (default), SSH
+container_disk_size_gb = 30 # Adjust based on model size and dependencies
+
+[project.env_vars]
+POD_INACTIVITY_TIMEOUT = "60" # Adjust as needed
+ORPHEUS_HOST = "0.0.0.0"
+ORPHEUS_PORT = "8000"
+ORPHEUS_API_URL = "http://llama-cpp-server:5006/v1/completions" # IMPORTANT: Ensure this points to your LLM backend
+ORPHEUS_API_TIMEOUT = "120"
+ORPHEUS_MAX_TOKENS = "8192"
+ORPHEUS_TEMPERATURE = "0.6"
+ORPHEUS_TOP_P = "0.9"
+ORPHEUS_SAMPLE_RATE = "24000"
+# ORPHEUS_MODEL_NAME = "model_name_if_needed_by_backend" # Uncomment and set if required by your LLM server
+
+[build]
+# Define how to build the Docker image
+context = "." # Build context is the Orpheus-FastAPI directory
+dockerfile = "Dockerfile.runpod" # We will create this Dockerfile next
+
+[runtime]
+# Command to start the Orpheus server within the container
+command = ["python", "-u", "app.py"]
+
+# [serverless] # Uncomment and configure if deploying as a Serverless Endpoint
+# handler_path = "src/handler.py" # Requires creating a handler script
+# max_workers = 3
+# min_workers = 0
+# concurrency_modifier = 0.5
+# idle_timeout = 300
+
+[network]
+# Network configuration (using RunPod defaults generally)
+# http_port = 8000 # RunPod default API port
+# tcp_ports = ["5005"] # Explicitly map Orpheus port if needed beyond standard proxy 

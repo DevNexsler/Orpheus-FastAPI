@@ -1,0 +1,39 @@
+# Use a RunPod base image with PyTorch and CUDA
+FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel
+
+# Set non-interactive frontend
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies required by Orpheus-FastAPI
+# Update package lists first
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    ffmpeg \
+    portaudio19-dev \
+ && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set up the working directory
+WORKDIR /app
+
+# Copy only the requirements file first to leverage Docker cache
+COPY requirements.txt ./
+
+# Install Python dependencies
+# Using RUNPOD_PYTORCH=1 prevents reinstalling torch included in the base image
+# Ensure pip is up-to-date and install requirements
+RUN export RUNPOD_PYTORCH=1 && \
+    python -m pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application code
+COPY . .
+
+# Set environment variables (optional, can also be set in runpod.toml)
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# Port exposure and command are handled by runpod.toml
+# EXPOSE 5005
+# CMD is defined in runpod.toml runtime.command 
