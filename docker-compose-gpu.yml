@@ -9,7 +9,16 @@ services:
     env_file:
       - .env
     environment:
-      - ORPHEUS_API_URL=http://llama-cpp-server:5006/v1/completions
+      - ORPHEUS_API_BASE_URL=${ORPHEUS_API_BASE_URL:-http://localhost:5000}
+      - ORPHEUS_API_TIMEOUT=${ORPHEUS_API_TIMEOUT:-30}
+      - ORPHEUS_PORT=${ORPHEUS_PORT:-8000}
+      - ORPHEUS_MAX_TOKENS=${ORPHEUS_MAX_TOKENS:-350}
+      - ORPHEUS_TEMPERATURE=${ORPHEUS_TEMPERATURE:-0.1}
+      - ORPHEUS_TOP_P=${ORPHEUS_TOP_P:-0.85}
+      - ORPHEUS_SAMPLE_RATE=${ORPHEUS_SAMPLE_RATE:-22050}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_KEY=${SUPABASE_KEY:-}
+      - SUPABASE_BUCKET=${SUPABASE_BUCKET:-tts-audio}
     deploy:
       resources:
         reservations:

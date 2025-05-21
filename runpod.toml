@@ -36,18 +36,24 @@ ORPHEUS_SAMPLE_RATE = "24000"
 context = "." # Build context is the Orpheus-FastAPI directory
 dockerfile = "Dockerfile.runpod" # We will create this Dockerfile next
 
-[runtime]
-# Command to start the Orpheus server within the container
-command = ["python", "-u", "app.py"]
+# [runtime]
+# # Command to start the Orpheus server within the container
+# # command = ["python", "-u", "app.py"]
+# command = ["python", "-u", "-c", "import os; import sys; import torch; print('---PYTHON DEBUG SCRIPT STARTED---', flush=True); print(f'Python version: {sys.version}', flush=True); print(f'Torch version: {torch.__version__}', flush=True); print(f'CUDA available: {torch.cuda.is_available()}', flush=True); print(f'Current PWD: {os.getcwd()}', flush=True); print('---Listing /app:---', flush=True); print(os.listdir('/app'), flush=True); print('---PYTHON DEBUG SCRIPT FINISHED INITIAL PRINTS, NOW SLEEPING---', flush=True); import time; time.sleep(600)"]
 
-# [serverless] # Uncomment and configure if deploying as a Serverless Endpoint
-# handler_path = "src/handler.py" # Requires creating a handler script
-# max_workers = 3
-# min_workers = 0
-# concurrency_modifier = 0.5
-# idle_timeout = 300
+[serverless]
+# Define serverless worker configuration
+max_workers = 3  # Example, adjust as needed
+min_workers = 0  # Example, 0 for scale-to-zero
+idle_timeout = 300 # Seconds before scaling down an idle worker
+concurrency_modifier = 1.0 # Adjust based on how many concurrent requests a single worker can handle
 
-[network]
-# Network configuration (using RunPod defaults generally)
-# http_port = 8000 # RunPod default API port
-# tcp_ports = ["5005"] # Explicitly map Orpheus port if needed beyond standard proxy 
+[api]
+# API configuration for RunPod Serverless Handler
+handler_path = "src/handler.py"  # Path to the handler script within the container
+handler_name = "tts_handler"      # Name of the handler function in handler.py
+
+# [network] # This section is usually not needed when using the serverless handler pattern
+# # Network configuration (using RunPod defaults generally)
+# # http_port = 8000 # RunPod default API port
+# # tcp_ports = ["5005"] # Explicitly map Orpheus port if needed beyond standard proxy 

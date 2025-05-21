@@ -437,3 +437,48 @@ For extended audio generation (books, long narrations), you may want to increase
 ## License
 
 This project is licensed under the Apache License 2.0 - see the LICENSE.txt file for details.
+
+## Supabase Storage Integration
+
+This TTS service supports storing generated audio files in Supabase Storage, which provides:
+
+- Persistent cloud storage for audio files
+- CDN delivery for better performance
+- Integration with your existing Supabase projects
+
+### Setup
+
+1. Create a Supabase project at [https://supabase.com/](https://supabase.com/)
+2. Get your project URL and API key from the Supabase dashboard
+3. Copy `supabase.env.example` to `.env` and add your credentials:
+   ```
+   SUPABASE_URL=your_project_url
+   SUPABASE_KEY=your_service_role_key
+   SUPABASE_BUCKET=tts-audio
+   ```
+
+### Usage
+
+When calling the API, set `store_in_supabase` to `true`:
+
+```json
+{
+  "input": "Your text to convert to speech",
+  "voice": "alloy",
+  "store_in_supabase": true
+}
+```
+
+The API will return a JSON response with the Supabase URL for the audio file:
+
+```json
+{
+  "status": "ok",
+  "voice": "alloy",
+  "output_file": "alloy_20230426_123456.wav",
+  "generation_time": 2.35,
+  "supabase_url": "https://your-project.supabase.co/storage/v1/object/public/tts-audio/abc123_alloy_20230426_123456.wav"
+}
+```
+
+This URL can be used directly in your applications for playback.

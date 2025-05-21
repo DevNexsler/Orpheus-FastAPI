@@ -9,6 +9,7 @@ python-multipart==0.0.6
 requests==2.31.0
 python-dotenv==1.0.0
 watchfiles==1.0.4
+supabase==2.15.1  # For Supabase Storage
 
 # Audio Processing
 numpy==1.24.0
@@ -23,6 +24,9 @@ psutil==5.9.0
 #   pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 # On macOS:
 #   pip3 install torch torchvision torchaudio
+
+# RunPod Serverless
+runpod
 
 # Optional Dependencies
 # For MP3 conversion (not currently implemented)

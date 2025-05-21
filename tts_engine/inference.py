@@ -74,7 +74,7 @@ else:
 
 # Load configuration from environment variables without hardcoded defaults
 # Critical settings - will log errors if missing
-required_settings = ["ORPHEUS_API_URL"]
+required_settings = ["ORPHEUS_API_URL", "ORPHEUS_API_KEY"]
 missing_settings = [s for s in required_settings if s not in os.environ]
 if missing_settings:
     print(f"ERROR: Missing required environment variable(s): {', '.join(missing_settings)}")
@@ -82,12 +82,18 @@ if missing_settings:
 
 # API connection settings
 API_URL = os.environ.get("ORPHEUS_API_URL")
+API_KEY = os.environ.get("ORPHEUS_API_KEY")
+
 if not API_URL:
     print("WARNING: ORPHEUS_API_URL not set. API calls will fail until configured.")
+if not API_KEY:
+    print("WARNING: ORPHEUS_API_KEY not set. API calls will likely fail due to unauthorized access.")
 
 HEADERS = {
     "Content-Type": "application/json"
 }
+if API_KEY:
+    HEADERS["Authorization"] = f"Bearer {API_KEY}"
 
 # Request timeout settings
 try:
@@ -128,6 +134,10 @@ except (ValueError, TypeError):
 if not IS_RELOADER:
     print(f"Configuration loaded:")
     print(f"  API_URL: {API_URL}")
+    if API_KEY:
+        print(f"  API_KEY: {'Loaded (sensitive value not shown)' if API_KEY else 'Not Set'}")
+    else:
+        print(f"  API_KEY: Not Set")
     print(f"  MAX_TOKENS: {MAX_TOKENS}")
     print(f"  TEMPERATURE: {TEMPERATURE}")
     print(f"  TOP_P: {TOP_P}")
@@ -252,19 +262,28 @@ def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperatur
         print("Using optimized parameters for GPU acceleration")
     
     # Create the request payload (model field may not be required by some endpoints but included for compatibility)
-    payload = {
-        "prompt": formatted_prompt,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_p": top_p,
-        "repeat_penalty": repetition_penalty,
-        "stream": True  # Always stream for better performance
+    # Inner dictionary for the actual model parameters
+    inner_payload = {
+        "prompt": formatted_prompt
     }
     
     # Add model field - this is ignored by many local inference servers for /v1/completions
     # but included for compatibility with OpenAI API and some servers that may use it
-    model_name = os.environ.get("ORPHEUS_MODEL_NAME", "Orpheus-3b-FT-Q8_0.gguf")
-    payload["model"] = model_name
+    # model_name = os.environ.get("ORPHEUS_MODEL_NAME", "Orpheus-3b-FT-Q8_0.gguf") # This line is now commented or removed
+    # inner_payload["model"] = model_name # This line is now commented or removed
+    
+    # Wrap the inner_payload under the "input" key for Runpod /runsync
+    # AND ensure stream:True is at this top level if the endpoint expects it there.
+    # Based on the direct curl tests for the LLM server, stream:True was NOT part of the payload
+    # that successfully streamed. The /completions endpoint of llama.cpp server streams by default if not told otherwise.
+    # For /runsync, the streaming behavior might be implicit or controlled by the endpoint itself.
+    # We will construct the payload to be as close as possible to the successful curl test for the LLM server.
+    payload = {
+        "input": inner_payload
+        # "stream": True # Let's try without this first, to match the simplest successful LLM curl test.
+                        # If the LLM server's /runsync *requires* stream:true at this level for programmatic calls,
+                        # we can add it back. But the direct curl test that streamed didn't explicitly send it.
+    }
     
     # Session for connection pooling and retry logic
     session = requests.Session()
@@ -275,6 +294,11 @@ def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperatur
     while retry_count < max_retries:
         try:
             # Make the API request with streaming and timeout
+            print(f"--- TTS Worker Debug ---")
+            print(f"Attempting to POST to URL: {API_URL}")
+            print(f"With HEADERS: {HEADERS}")
+            print(f"With PAYLOAD: {payload}")
+            print(f"--- End TTS Worker Debug ---")
             response = session.post(
                 API_URL, 
                 headers=HEADERS, 
@@ -300,29 +324,61 @@ def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperatur
             token_counter = 0
             
             # Iterate through the response to get tokens
+            # We now expect the LLM to send a single line containing the full JSON response.
             for line in response.iter_lines():
                 if line:
                     line_str = line.decode('utf-8')
-                    if line_str.startswith('data: '):
-                        data_str = line_str[6:]  # Remove the 'data: ' prefix
-                        
-                        if data_str.strip() == '[DONE]':
-                            break
+                    print(f"TTS_WORKER_STREAM_DEBUG --- Raw line_str from LLM: '{line_str}'") # DEBUG
+                    
+                    # Attempt to parse the entire line as a JSON object
+                    try:
+                        llm_response_data = json.loads(line_str)
+                        print(f"TTS_WORKER_STREAM_DEBUG --- Successfully parsed llm_response_data: {llm_response_data}") # DEBUG
+
+                        # Navigate to the generated text
+                        # Based on logs: response_data['output'][0]['output']['generated_text']
+                        if (llm_response_data.get('output') and 
+                            isinstance(llm_response_data['output'], list) and 
+                            len(llm_response_data['output']) > 0 and
+                            isinstance(llm_response_data['output'][0], dict) and
+                            llm_response_data['output'][0].get('output') and
+                            isinstance(llm_response_data['output'][0]['output'], dict) and
+                            llm_response_data['output'][0]['output'].get('generated_text')):
+
+                            generated_text_combined = llm_response_data['output'][0]['output']['generated_text']
+                            print(f"TTS_WORKER_STREAM_DEBUG --- Extracted generated_text_combined: '{generated_text_combined}'")
+
+                            # Split the combined text into individual tokens.
+                            # Orpheus tokens are like "<custom_token_XXXX>"
+                            # A simple way to split is by the ">" character and re-adding it.
+                            # More robust might be regex: re.findall(r'(<custom_token_\\d+>)', generated_text_combined)
                             
-                        try:
-                            data = json.loads(data_str)
-                            if 'choices' in data and len(data['choices']) > 0:
-                                token_chunk = data['choices'][0].get('text', '')
-                                for token_text in token_chunk.split('>'):
-                                    token_text = f'{token_text}>'
+                            # Using a simpler split for now, assuming tokens are well-formed and contiguous
+                            raw_tokens = generated_text_combined.split('<') # Results in ['', 'custom_token_X>', 'custom_token_Y>', ...]
+                            
+                            for rt in raw_tokens:
+                                if rt.startswith('custom_token_') and rt.endswith('>'):
+                                    token_text = '<' + rt
+                                    print(f"TTS_WORKER_STREAM_DEBUG --- Yielding token_text: '{token_text}'") # DEBUG
                                     token_counter += 1
                                     perf_monitor.add_tokens()
+                                    yield token_text
+                                elif rt: # Log other non-empty parts that are not custom tokens
+                                    print(f"TTS_WORKER_STREAM_DEBUG --- Non-custom-token part found and skipped: '{rt}'")
 
-                                    if token_text:
-                                        yield token_text
-                        except json.JSONDecodeError as e:
-                            print(f"Error decoding JSON: {e}")
-                            continue
+
+                            # Since we got the full response in one line, we can break the loop.
+                            print(f"TTS_WORKER_STREAM_DEBUG --- Processed the single line response. Breaking loop.")
+                            break 
+                        else:
+                            print(f"TTS_WORKER_STREAM_DEBUG --- 'generated_text' not found at the expected path in llm_response_data.")
+                            # Break if the structure isn't as expected, as we assume one line response.
+                            break
+
+                    except json.JSONDecodeError as e:
+                        print(f"TTS_WORKER_STREAM_DEBUG --- Error decoding JSON from line: {e}. Offending line_str: '{line_str}'")
+                        # If this single line isn't JSON, something is wrong.
+                        break 
             
             # Generation completed successfully
             generation_time = time.time() - start_time
