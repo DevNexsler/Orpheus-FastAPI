@@ -82,15 +82,30 @@ class SupabaseStorageClient:
             if isinstance(response, list):
                 if not any(b.name == self.bucket_name for b in response):
                     logger.info(f"Bucket '{self.bucket_name}' not found. Creating now with public access...")
+                    
+                    # --- DEFENSIVE CAST AND LOGGING ---
+                    bucket_name_to_create = str(self.bucket_name)
+                    logger.info(f"DEBUG: About to create bucket. Name: '{bucket_name_to_create}', Type: {type(bucket_name_to_create)}")
+                    # --- END DEFENSIVE CAST AND LOGGING ---
+
                     # create_bucket is synchronous
-                    create_response = self.supabase.storage.create_bucket(self.bucket_name, {"public": True}) 
-                    # Check create_response for errors
-                    if hasattr(create_response, 'error') and create_response.error:
-                        # Try to get a message from the error
-                        msg = create_response.error.message if hasattr(create_response.error, 'message') else str(create_response.error)
-                        logger.error(f"Failed to create bucket '{self.bucket_name}': {msg}")
-                        raise Exception(f"Failed to create bucket: {msg}") # Propagate as a Python exception
-                    logger.info(f"Bucket '{self.bucket_name}' created successfully.")
+                    # --- DIAGNOSTIC STEP: Try creating with default (private) options ---
+                    logger.info("DIAGNOSTIC: Attempting to create bucket with default (private) options.")
+                    create_response = self.supabase.storage.create_bucket(
+                        bucket_name_to_create
+                    )
+                    # Original call was:
+                    # create_response = self.supabase.storage.create_bucket(
+                    #     bucket_name_to_create, 
+                    #     options=BucketOptions(public=True)
+                    # )
+                    # --- END DIAGNOSTIC STEP ---
+                    logger.info(f"Bucket '{bucket_name_to_create}' creation attempt response: {create_response}")
+                    # After creation, we might want to make it public if that's the goal,
+                    # or update its policies, but first let's see if creation itself works.
+                    # For now, if it creates, we'll assume it's okay for the test.
+                    # If the goal is a public bucket, and this private creation works,
+                    # we'd then need to investigate updating the bucket to be public separately.
                 else:
                     logger.info(f"Bucket '{self.bucket_name}' already exists.")
             elif hasattr(response, 'error') and response.error: # If list_buckets itself returned an error object
@@ -101,6 +116,9 @@ class SupabaseStorageClient:
                 else:
                     logger.error(f"Failed to list buckets: {msg}")
                     raise Exception(f"Failed to list buckets: {msg}")
+            elif isinstance(response, Exception): # Handle direct exception from list_buckets
+                logger.error(f"Supabase Exception while listing buckets: {response}")
+                raise response # Re-raise the exception to be caught by initialize_client
             else:
                 # Fallback for unexpected response type from list_buckets
                 logger.error(f"Unexpected response type from list_buckets: {type(response)}. Content: {str(response)[:200]}")
@@ -145,10 +163,14 @@ class SupabaseStorageClient:
                 # Assuming v1.x for now based on typical RunPod environments unless supabase-py v2 is explicitly installed.
                 # If it's v2 and .upload is async, this needs `await`.
                 # Let's check supabase-py version or assume sync first. If an error occurs here, we will know.
+                
+                current_file_options = {"cache-control": "3600", "upsert": "true"} 
+                logger.info(f"DEBUG UPLOAD: Using file_options: {current_file_options}, type of upsert: {type(current_file_options.get('upsert'))}")
+                
                 upload_response = self.supabase.storage.from_(self.bucket_name).upload(
                     path=supabase_upload_path,
                     file=f,
-                    file_options={"cache-control": "3600", "upsert": True} 
+                    file_options=current_file_options
                 )
             
             logger.info(f"Upload attempt for '{supabase_upload_path}' completed.")
