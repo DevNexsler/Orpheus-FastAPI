@@ -15,61 +15,59 @@ from dotenv import load_dotenv
 load_dotenv(override=True) # override=True ensures OS vars can override .env vars if both exist
 print("---HANDLER.PY: load_dotenv() called.---", flush=True)
 
-# Assuming tts_engine and its components are in thePYTHONPATH
-# We might need to adjust imports based on the final structure in the container
-from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE
-# Import Supabase client
-from tts_engine.supabase_client import SupabaseStorageClient
-
-# Setup logging (retained for good practice, but we'll add prints)
-logging.basicConfig(level=logging.INFO)
+# --- Setup logging (retained for good practice, but we'll add prints) ---
+logging.basicConfig(level=logging.INFO) # Configure logging early
 logger = logging.getLogger(__name__)
+print("---HANDLER.PY: Basic logging configured.---", flush=True)
 
-print("---HANDLER.PY TOP LEVEL SCRIPT EXECUTION---", flush=True)
+# --- CRITICAL IMPORTS AND INITIALIZATION WITH DETAILED ERROR LOGGING ---
+print("---HANDLER.PY: Attempting critical imports and TTS Engine initialization...---", flush=True)
+# Use string literal for type hint to avoid NameError before import
+supabase_client_instance: Optional["SupabaseStorageClient"] = None # Declare for later use
 
-# --- Initialize Supabase Client ---
-supabase_client_instance: Optional[SupabaseStorageClient] = None
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET")
-
-if SUPABASE_URL and SUPABASE_KEY and SUPABASE_BUCKET:
-    try:
-        supabase_client_instance = SupabaseStorageClient()
-        print("---HANDLER.PY: SupabaseStorageClient initialized.---", flush=True)
-        logger.info("SupabaseStorageClient initialized.")
-    except Exception as e:
-        print(f"---HANDLER.PY: WARNING - Failed to initialize SupabaseStorageClient: {e}---", flush=True)
-        logger.warning(f"Failed to initialize SupabaseStorageClient: {e}", exc_info=True)
-        supabase_client_instance = None # Ensure it's None if initialization fails
-else:
-    print("---HANDLER.PY: Supabase credentials not fully configured. Supabase uploads will be skipped.---", flush=True)
-    logger.warning("Supabase URL, Key, or Bucket not fully configured. Supabase uploads will be skipped.")
-
-# --- Model Loading ---
-# This part runs once when the worker starts.
-logger.info("Handler script started. Initializing TTS Engine...")
-print("---HANDLER.PY: Attempting to initialize TTS Engine...---", flush=True)
 try:
+    # Assuming tts_engine and its components are in the PYTHONPATH
+    from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE
+    print("---HANDLER.PY: Successfully imported from tts_engine.---", flush=True)
+    
+    # Import Supabase client
+    from tts_engine.supabase_client import SupabaseStorageClient
+    print("---HANDLER.PY: Successfully imported SupabaseStorageClient.---", flush=True)
+
     # The SNAC model is loaded by speechpipe.py when it's imported.
-    # We just need to ensure tts_engine is imported.
-    # If SNAC.from_pretrained needs specific conditions or takes time,
-    # this is where it happens.
+    # We just need to ensure tts_engine.speechpipe is imported.
     import tts_engine.speechpipe # This should trigger the model load
     logger.info("TTS Engine initialized (SNAC model should be loaded/downloaded).")
-    print("---HANDLER.PY: TTS Engine initialized (SNAC model should be loaded/downloaded).---", flush=True)
+    print("---HANDLER.PY: TTS Engine initialized (SNAC model should be loaded/downloaded via speechpipe import).---", flush=True)
+
 except Exception as e:
-    logger.error(f"Error initializing TTS Engine (model loading): {e}", exc_info=True)
-    print(f"---HANDLER.PY: CRITICAL ERROR initializing TTS Engine: {e}---", flush=True)
+    import traceback
+    tb_str = traceback.format_exc()
+    # Log to both logger and print for maximum visibility
+    logger.error(f"---HANDLER.PY: CRITICAL STARTUP ERROR during imports or TTS init: {e} ---", exc_info=True)
+    print(f"---HANDLER.PY: CRITICAL STARTUP ERROR during imports or TTS init: {e} ---", flush=True)
+    print(f"---HANDLER.PY: TRACEBACK: {tb_str} ---", flush=True)
     # If model loading fails, the handler won't work.
-    # Depending on RunPod behavior, this might cause the worker to be unhealthy.
-    raise # Reraise the exception to indicate a fatal startup error
+    # Reraise the exception to indicate a fatal startup error, which will cause worker exit.
+    raise e
+
+# --- Supabase Client Global Instance (already declared, just for clarity) ---
+# supabase_client_instance: Optional[SupabaseStorageClient] = None 
+# This is already declared above before the try-except block.
 
 async def get_supabase_client() -> SupabaseStorageClient:
     """Gets or initializes the Supabase client. Ensures it's initialized before returning."""
     global supabase_client_instance
     if supabase_client_instance is None or not supabase_client_instance.initialized:
         logger.info("Supabase client instance not found or not initialized. Creating/Initializing...")
+        # Ensure SupabaseStorageClient was successfully imported before trying to instantiate
+        if 'SupabaseStorageClient' not in globals() and 'SupabaseStorageClient' not in locals():
+             # This case should ideally be caught by the import error block above,
+             # but as a safeguard:
+             err_msg = "SupabaseStorageClient class not available due to earlier import failure."
+             logger.error(f"---GET_SUPABASE_CLIENT: {err_msg} ---")
+             raise ImportError(err_msg)
+             
         supabase_client_instance = SupabaseStorageClient() # Creates the config
         try:
             await supabase_client_instance.initialize_client() # Actually connects and checks bucket
@@ -128,9 +126,9 @@ async def tts_handler(job: Dict[str, Any]) -> Dict[str, Any]:
         # If it were async, we would await it.
         # For CPU-bound or blocking I/O in an async handler, consider run_in_executor.
         success, details = generate_speech_from_api(
-            text=text_to_speak,
-            voice_id=voice,
-            output_path=temp_output_path,
+            prompt=text_to_speak,
+            voice=voice,
+            output_file=temp_output_path,
             output_format=output_format # Pass output_format to the engine
             # Add other parameters like model, sample_rate if needed
         )
@@ -223,5 +221,6 @@ async def tts_handler(job: Dict[str, Any]) -> Dict[str, Any]:
 
 # Start the RunPod serverless handler
 logger.info("---HANDLER.PY: Attempting to start RunPod serverless handler...---")
+print("---HANDLER.PY: Attempting to start RunPod serverless handler...---", flush=True) # Added flush
 runpod.serverless.start({"handler": tts_handler})
 print("---HANDLER.PY: runpod.serverless.start call completed (this line might not be reached if it blocks).---", flush=True) 
