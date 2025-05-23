@@ -102,6 +102,8 @@ except (ValueError, TypeError):
     print("WARNING: Invalid ORPHEUS_API_TIMEOUT value, using 120 seconds as fallback")
     REQUEST_TIMEOUT = 120
 
+print(f"--- DEBUG: Initial REQUEST_TIMEOUT set to: {REQUEST_TIMEOUT} seconds ---")
+
 # Model generation parameters from environment variables
 try:
     MAX_TOKENS = int(os.environ.get("ORPHEUS_MAX_TOKENS", "8192"))
@@ -291,9 +293,12 @@ def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperatur
     retry_count = 0
     max_retries = 3
     
+    print(f"--- DEBUG: REQUEST_TIMEOUT in generate_tokens_from_api just before loop: {REQUEST_TIMEOUT} seconds ---")
+
     while retry_count < max_retries:
         try:
             # Make the API request with streaming and timeout
+            print(f"--- DEBUG: REQUEST_TIMEOUT used for session.post: {REQUEST_TIMEOUT} seconds ---")
             print(f"--- TTS Worker Debug ---")
             print(f"Attempting to POST to URL: {API_URL}")
             print(f"With HEADERS: {HEADERS}")
@@ -726,7 +731,7 @@ def split_text_into_sentences(text):
 
 def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temperature=TEMPERATURE, 
                              top_p=TOP_P, max_tokens=MAX_TOKENS, repetition_penalty=None, 
-                             use_batching=True, max_batch_chars=1000, 
+                             use_batching=True, max_batch_chars=2500, 
                              output_format: Optional[str] = "wav") -> Tuple[bool, Optional[str]]:
     """
     Generate speech from text using Orpheus model with performance optimizations.
@@ -820,23 +825,37 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
                  print(f"Realtime factor: {duration_generated/total_time:.2f}x")
         else:
             print(f"No audio segments generated. Total time: {total_time:.2f} seconds")
+            # If no audio segments were generated, it's a failure, regardless of file creation.
+            if output_file and os.path.exists(output_file):
+                # Log the empty file situation more clearly as an error before returning failure
+                if os.path.getsize(output_file) <= 44: # Check for empty or header-only WAV
+                    error_msg = f"Output file {output_file} was created but contains no audio data (size: {os.path.getsize(output_file)} bytes)."
+                    print(f"ERROR: {error_msg}")
+                    return False, error_msg
+            
+            error_msg = "No audio segments were generated during the process."
+            print(f"ERROR: {error_msg}")
+            return False, error_msg
 
-        # Check if the output file was created and is not empty
+
+        # Check if the output file was created and is not empty (beyond just a header)
         if output_file:
             if not os.path.exists(output_file):
                 error_msg = f"Output file {output_file} was not created."
                 print(f"ERROR: {error_msg}")
                 return False, error_msg
-            if os.path.getsize(output_file) == 0:
-                error_msg = f"Output file {output_file} is empty."
+            # A typical WAV header is 44 bytes. If it's that or less, it's effectively empty.
+            if os.path.getsize(output_file) <= 44: 
+                error_msg = f"Output file {output_file} is empty or contains only a header (size: {os.path.getsize(output_file)} bytes)."
                 print(f"ERROR: {error_msg}")
                 # Optionally remove empty file: os.remove(output_file)
                 return False, error_msg
             print(f"Successfully generated speech to {output_file}")
-        elif not all_audio_segments: # If no output file and no audio segments, it's an issue.
-             error_msg = "No audio segments generated and no output file specified."
-             print(f"ERROR: {error_msg}")
-             return False, error_msg
+        # This 'elif' is now effectively covered by the 'else' block for 'if all_audio_segments:'
+        # elif not all_audio_segments: # If no output file and no audio segments, it's an issue.
+        #      error_msg = "No audio segments generated and no output file specified."
+        #      print(f"ERROR: {error_msg}")
+        #      return False, error_msg
 
 
         print(f"Total speech generation completed in {total_time:.2f} seconds")
@@ -851,7 +870,7 @@ Traceback:
         print(error_msg)
         return False, str(e) # Return the error message
 
-def stitch_wav_files(input_files, output_file, crossfade_ms=50):
+def stitch_wav_files(input_files, output_file, crossfade_ms=100):
     """Stitch multiple WAV files together with crossfading for smooth transitions."""
     if not input_files:
         return
