@@ -45,15 +45,13 @@ ensure_env_file_exists()
 load_dotenv(override=True)
 
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import json
 
 from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_TO_LANGUAGE, AVAILABLE_LANGUAGES
-# Import Supabase storage client
-from tts_engine.supabase_client import supabase_client
 
 # Create FastAPI app
 app = FastAPI(
@@ -84,14 +82,12 @@ class SpeechRequest(BaseModel):
     voice: str = DEFAULT_VOICE
     response_format: str = "wav"
     speed: float = 1.0
-    store_in_supabase: bool = False  # Option to store in Supabase
 
 class APIResponse(BaseModel):
     status: str
     voice: str
     output_file: str
     generation_time: float
-    supabase_url: Optional[str] = None  # URL if stored in Supabase
 
 # OpenAI-compatible API endpoint
 @app.post("/v1/audio/speech")
@@ -127,22 +123,7 @@ async def create_speech_api(request: SpeechRequest):
     end = time.time()
     generation_time = round(end - start, 2)
     
-    # Upload to Supabase if requested
-    supabase_url = None
-    if request.store_in_supabase:
-        success, result = await supabase_client.upload_file(output_path)
-        if success:
-            supabase_url = result
-            # Return JSON with file info instead of the file itself
-            return JSONResponse(content={
-                "status": "ok",
-                "voice": request.voice,
-                "output_file": os.path.basename(output_path),
-                "generation_time": generation_time,
-                "supabase_url": supabase_url
-            })
-    
-    # Return audio file if not storing in Supabase or if upload failed
+    # Return audio file
     return FileResponse(
         path=output_path,
         media_type="audio/wav",
@@ -168,7 +149,6 @@ async def speak(request: Request):
     data = await request.json()
     text = data.get("text", "")
     voice = data.get("voice", DEFAULT_VOICE)
-    store_in_supabase = data.get("store_in_supabase", False)
 
     if not text:
         return JSONResponse(
@@ -196,19 +176,11 @@ async def speak(request: Request):
     end = time.time()
     generation_time = round(end - start, 2)
 
-    # Upload to Supabase if requested
-    supabase_url = None
-    if store_in_supabase:
-        success, result = await supabase_client.upload_file(output_path)
-        if success:
-            supabase_url = result
-
     return JSONResponse(content={
         "status": "ok",
         "voice": voice,
         "output_file": output_path,
-        "generation_time": generation_time,
-        "supabase_url": supabase_url
+        "generation_time": generation_time
     })
 
 # Web UI routes

@@ -89,7 +89,7 @@ async def tts_handler(job: Dict[str, Any]) -> Dict[str, Any]:
     if not job_input:
         logger.error(f"---TTS_HANDLER [{job_id}]: No input found in job.---")
         return {"error": "No input provided", "status": "FAILED"}
-
+        
     logger.debug(f"---TTS_HANDLER [{job_id}]: Job input: {job_input}---")
 
     text_to_speak = job_input.get("input")
@@ -133,7 +133,7 @@ async def tts_handler(job: Dict[str, Any]) -> Dict[str, Any]:
             # Add other parameters like model, sample_rate if needed
         )
         generation_time = time.time() - start_time
-
+        
         if not success:
             logger.error(f"---TTS_HANDLER [{job_id}]: Speech generation failed. Details: {details}---")
             return {"error": f"Speech generation failed: {details}", "status": "FAILED"}
@@ -146,7 +146,7 @@ async def tts_handler(job: Dict[str, Any]) -> Dict[str, Any]:
         
         file_size_bytes = os.path.getsize(temp_output_path)
         logger.info(f"---TTS_HANDLER [{job_id}]: Generated file size: {file_size_bytes} bytes.---")
-
+        
         response_payload: Dict[str, Any] = {
             "status": "ok",
             "voice": voice,

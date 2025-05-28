@@ -1,7 +1,6 @@
 import os
 import tempfile
 from supabase import create_client, Client
-from supabase.lib.client_options import ClientOptions
 from dotenv import load_dotenv
 from typing import Optional, Tuple
 import uuid
@@ -45,10 +44,9 @@ class SupabaseStorageClient:
 
         logger.info("Initializing Supabase client...")
         try:
-            # Consider using ClientOptions if specific retry logic or timeouts are needed later
-            # opts = ClientOptions(postgrest_client_timeout=10, storage_client_timeout=10)
-            # self.supabase = create_client(self.supabase_url, self.supabase_key, options=opts)
+            # Initialize client without explicit options, as per Supabase documentation examples.
             self.supabase = create_client(self.supabase_url, self.supabase_key)
+            
             if not self.supabase:
                 raise ConnectionError("Failed to create Supabase client instance.")
             

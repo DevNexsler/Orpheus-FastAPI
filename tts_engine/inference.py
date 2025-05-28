@@ -5,7 +5,6 @@ import json
 import time
 import wave
 import numpy as np
-import sounddevice as sd
 import argparse
 import threading
 import queue
@@ -13,6 +12,14 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Generator, Union, Tuple, AsyncGenerator
 from dotenv import load_dotenv
+
+# Optional sounddevice import for local audio playback
+try:
+    import sounddevice as sd
+    SOUNDDEVICE_AVAILABLE = True
+except ImportError:
+    print("Warning: sounddevice not available. Audio playback disabled.")
+    SOUNDDEVICE_AVAILABLE = False
 
 # Helper to detect if running in Uvicorn's reloader
 def is_reloader_process():
@@ -112,16 +119,16 @@ except (ValueError, TypeError):
     MAX_TOKENS = 8192
 
 try:
-    TEMPERATURE = float(os.environ.get("ORPHEUS_TEMPERATURE", "0.6"))
+    TEMPERATURE = float(os.environ.get("ORPHEUS_TEMPERATURE", "0.1"))
 except (ValueError, TypeError):
-    print("WARNING: Invalid ORPHEUS_TEMPERATURE value, using 0.6 as fallback")
-    TEMPERATURE = 0.6
+    print("WARNING: Invalid ORPHEUS_TEMPERATURE value, using 0.1 as fallback")
+    TEMPERATURE = 0.1
 
 try:
-    TOP_P = float(os.environ.get("ORPHEUS_TOP_P", "0.9"))
+    TOP_P = float(os.environ.get("ORPHEUS_TOP_P", "0.85"))
 except (ValueError, TypeError):
-    print("WARNING: Invalid ORPHEUS_TOP_P value, using 0.9 as fallback")
-    TOP_P = 0.9
+    print("WARNING: Invalid ORPHEUS_TOP_P value, using 0.85 as fallback")
+    TOP_P = 0.85
 
 # Repetition penalty is hardcoded to 1.1 which is the only stable value for quality output
 REPETITION_PENALTY = 1.1
@@ -251,40 +258,31 @@ def format_prompt(prompt: str, voice: str = DEFAULT_VOICE) -> str:
 def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperature: float = TEMPERATURE, 
                            top_p: float = TOP_P, max_tokens: int = MAX_TOKENS, 
                            repetition_penalty: float = REPETITION_PENALTY) -> Generator[str, None, None]:
-    """Generate tokens from text using OpenAI-compatible API with optimized streaming and retry logic."""
+    """Generate tokens from text using RunPod API with proper JSON response handling."""
     start_time = time.time()
     formatted_prompt = format_prompt(prompt, voice)
     print(f"Generating speech for: {formatted_prompt}")
     
     # Optimize the token generation for GPUs
     if HIGH_END_GPU:
-        # Use more aggressive parameters for faster generation on high-end GPUs
         print("Using optimized parameters for high-end GPU")
     elif torch.cuda.is_available():
         print("Using optimized parameters for GPU acceleration")
     
-    # Create the request payload (model field may not be required by some endpoints but included for compatibility)
-    # Inner dictionary for the actual model parameters
-    inner_payload = {
-        "prompt": formatted_prompt
+    # Create the request payload for the LLM server
+    llm_input_payload = {
+        "prompt": formatted_prompt,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "repetition_penalty": repetition_penalty,
+        "stop": ["<|eot_id|>"],
+        "stream": False  # Use synchronous mode since streaming endpoints aren't available
     }
     
-    # Add model field - this is ignored by many local inference servers for /v1/completions
-    # but included for compatibility with OpenAI API and some servers that may use it
-    # model_name = os.environ.get("ORPHEUS_MODEL_NAME", "Orpheus-3b-FT-Q8_0.gguf") # This line is now commented or removed
-    # inner_payload["model"] = model_name # This line is now commented or removed
-    
-    # Wrap the inner_payload under the "input" key for Runpod /runsync
-    # AND ensure stream:True is at this top level if the endpoint expects it there.
-    # Based on the direct curl tests for the LLM server, stream:True was NOT part of the payload
-    # that successfully streamed. The /completions endpoint of llama.cpp server streams by default if not told otherwise.
-    # For /runsync, the streaming behavior might be implicit or controlled by the endpoint itself.
-    # We will construct the payload to be as close as possible to the successful curl test for the LLM server.
+    # Wrap the llm_input_payload under the "input" key for RunPod
     payload = {
-        "input": inner_payload
-        # "stream": True # Let's try without this first, to match the simplest successful LLM curl test.
-                        # If the LLM server's /runsync *requires* stream:true at this level for programmatic calls,
-                        # we can add it back. But the direct curl test that streamed didn't explicitly send it.
+        "input": llm_input_payload
     }
     
     # Session for connection pooling and retry logic
@@ -293,102 +291,107 @@ def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperatur
     retry_count = 0
     max_retries = 3
     
-    print(f"--- DEBUG: REQUEST_TIMEOUT in generate_tokens_from_api just before loop: {REQUEST_TIMEOUT} seconds ---")
-
+    print(f"--- DEBUG: REQUEST_TIMEOUT in generate_tokens_from_api: {REQUEST_TIMEOUT} seconds ---")
+    
     while retry_count < max_retries:
         try:
-            # Make the API request with streaming and timeout
-            print(f"--- DEBUG: REQUEST_TIMEOUT used for session.post: {REQUEST_TIMEOUT} seconds ---")
             print(f"--- TTS Worker Debug ---")
             print(f"Attempting to POST to URL: {API_URL}")
-            print(f"With HEADERS: {HEADERS}")
-            print(f"With PAYLOAD: {payload}")
             print(f"--- End TTS Worker Debug ---")
+            
+            # Use the /runsync endpoint directly since streaming endpoints aren't supported
             response = session.post(
                 API_URL, 
                 headers=HEADERS, 
                 json=payload, 
-                stream=True,
                 timeout=REQUEST_TIMEOUT
             )
             
-            if response.status_code != 200:
-                print(f"Error: API request failed with status code {response.status_code}")
-                print(f"Error details: {response.text}")
-                # Retry on server errors (5xx) but not on client errors (4xx)
-                if response.status_code >= 500:
-                    retry_count += 1
-                    wait_time = 2 ** retry_count  # Exponential backoff
-                    print(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
-                return
+            response.raise_for_status()
+            response_data = response.json()
             
-            # Process the streamed response with better buffering
-            buffer = ""
+            print(f"TTS_WORKER_DEBUG --- Response received: {type(response_data)}")
+            
+            # Process the complete JSON response
             token_counter = 0
             
-            # Iterate through the response to get tokens
-            # We now expect the LLM to send a single line containing the full JSON response.
-            for line in response.iter_lines():
-                if line:
-                    line_str = line.decode('utf-8')
-                    print(f"TTS_WORKER_STREAM_DEBUG --- Raw line_str from LLM: '{line_str}'") # DEBUG
+            # Handle the response format: {"output": [{"output": {"generated_text": "<custom_token_4><custom_token_5>..."}}]}
+            if isinstance(response_data, dict) and "output" in response_data:
+                output_data = response_data["output"]
+                
+                if isinstance(output_data, list):
+                    print(f"TTS_WORKER_DEBUG --- Processing {len(output_data)} items from output array")
                     
-                    # Attempt to parse the entire line as a JSON object
-                    try:
-                        llm_response_data = json.loads(line_str)
-                        print(f"TTS_WORKER_STREAM_DEBUG --- Successfully parsed llm_response_data: {llm_response_data}") # DEBUG
-
-                        # Navigate to the generated text
-                        # Based on logs: response_data['output'][0]['output']['generated_text']
-                        if (llm_response_data.get('output') and 
-                            isinstance(llm_response_data['output'], list) and 
-                            len(llm_response_data['output']) > 0 and
-                            isinstance(llm_response_data['output'][0], dict) and
-                            llm_response_data['output'][0].get('output') and
-                            isinstance(llm_response_data['output'][0]['output'], dict) and
-                            llm_response_data['output'][0]['output'].get('generated_text')):
-
-                            generated_text_combined = llm_response_data['output'][0]['output']['generated_text']
-                            print(f"TTS_WORKER_STREAM_DEBUG --- Extracted generated_text_combined: '{generated_text_combined}'")
-
-                            # Split the combined text into individual tokens.
-                            # Orpheus tokens are like "<custom_token_XXXX>"
-                            # A simple way to split is by the ">" character and re-adding it.
-                            # More robust might be regex: re.findall(r'(<custom_token_\\d+>)', generated_text_combined)
-                            
-                            # Using a simpler split for now, assuming tokens are well-formed and contiguous
-                            raw_tokens = generated_text_combined.split('<') # Results in ['', 'custom_token_X>', 'custom_token_Y>', ...]
-                            
-                            for rt in raw_tokens:
-                                if rt.startswith('custom_token_') and rt.endswith('>'):
-                                    token_text = '<' + rt
-                                    print(f"TTS_WORKER_STREAM_DEBUG --- Yielding token_text: '{token_text}'") # DEBUG
+                    for item in output_data:
+                        if isinstance(item, dict):
+                            # Handle nested structure: item["output"]["generated_text"]
+                            if "output" in item and isinstance(item["output"], dict):
+                                generated_text = item["output"].get("generated_text", "")
+                                print(f"TTS_WORKER_DEBUG --- Found generated_text with {len(generated_text)} characters")
+                                
+                                # Parse tokens from the generated text string
+                                import re
+                                # Find all custom tokens in the format <custom_token_XXXX>
+                                token_pattern = r'<custom_token_\d+>'
+                                tokens = re.findall(token_pattern, generated_text)
+                                
+                                print(f"TTS_WORKER_DEBUG --- Extracted {len(tokens)} custom tokens from generated text")
+                                
+                                for token_text in tokens:
                                     token_counter += 1
                                     perf_monitor.add_tokens()
+                                    print(f"TTS_WORKER_DEBUG --- Yielding token {token_counter}: {token_text}")
                                     yield token_text
-                                elif rt: # Log other non-empty parts that are not custom tokens
-                                    print(f"TTS_WORKER_STREAM_DEBUG --- Non-custom-token part found and skipped: '{rt}'")
-
-
-                            # Since we got the full response in one line, we can break the loop.
-                            print(f"TTS_WORKER_STREAM_DEBUG --- Processed the single line response. Breaking loop.")
-                            break 
+                                    
+                            # Handle direct text format: item["text"]
+                            elif "text" in item:
+                                token_text = item["text"]
+                                
+                                # Check if this is a custom token
+                                if token_text.startswith(CUSTOM_TOKEN_PREFIX) and token_text.endswith('>'):
+                                    token_counter += 1
+                                    perf_monitor.add_tokens()
+                                    print(f"TTS_WORKER_DEBUG --- Yielding token {token_counter}: {token_text}")
+                                    yield token_text
+                                else:
+                                    print(f"TTS_WORKER_DEBUG --- Skipping non-custom token: {token_text}")
+                            else:
+                                print(f"TTS_WORKER_DEBUG --- Item has unexpected structure: {list(item.keys())}")
                         else:
-                            print(f"TTS_WORKER_STREAM_DEBUG --- 'generated_text' not found at the expected path in llm_response_data.")
-                            # Break if the structure isn't as expected, as we assume one line response.
-                            break
-                    except json.JSONDecodeError as e:
-                        print(f"TTS_WORKER_STREAM_DEBUG --- Error decoding JSON from line: {e}. Offending line_str: '{line_str}'")
-                        # If this single line isn't JSON, something is wrong.
-                        break 
+                            print(f"TTS_WORKER_DEBUG --- Non-dict item in output array: {type(item)}")
+                else:
+                    print(f"TTS_WORKER_DEBUG --- Unexpected output format: {type(output_data)}")
+            else:
+                print(f"TTS_WORKER_DEBUG --- No 'output' key in response or unexpected format")
+                print(f"TTS_WORKER_DEBUG --- Response keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
             
-            # Generation completed successfully
+            # Report completion
             generation_time = time.time() - start_time
             tokens_per_second = token_counter / generation_time if generation_time > 0 else 0
-            print(f"Token generation complete: {token_counter} tokens in {generation_time:.2f}s ({tokens_per_second:.1f} tokens/sec)")
-            return
+            print(f"Token processing complete: {token_counter} tokens in {generation_time:.2f}s ({tokens_per_second:.1f} tokens/sec)")
+            
+            if token_counter == 0:
+                print("Warning: LLM response contained no custom tokens.")
+                print(f"TTS_WORKER_DEBUG --- Full response for debugging: {json.dumps(response_data, indent=2)}")
+            
+            return  # Successful completion
+
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP error occurred: {http_err} - Status Code: {http_err.response.status_code}")
+            print(f"Response text: {http_err.response.text}")
+            if http_err.response.status_code >= 500:
+                retry_count += 1
+                if retry_count < max_retries:
+                    wait_time = 2 ** retry_count
+                    print(f"Retrying in {wait_time} seconds... (attempt {retry_count + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print("Max retries reached for HTTPError. Token generation failed.")
+                    return
+            else:
+                print("Client-side HTTPError. Not retrying. Token generation failed.")
+                return
             
         except requests.exceptions.Timeout:
             print(f"Request timed out after {REQUEST_TIMEOUT} seconds")
@@ -398,19 +401,29 @@ def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperatur
                 print(f"Retrying in {wait_time} seconds... (attempt {retry_count+1}/{max_retries})")
                 time.sleep(wait_time)
             else:
-                print("Max retries reached. Token generation failed.")
+                print("Max retries reached for Timeout. Token generation failed.")
                 return
                 
-        except requests.exceptions.ConnectionError:
-            print(f"Connection error to API at {API_URL}")
+        except requests.exceptions.ConnectionError as conn_err:
+            print(f"Connection error to API at {API_URL}: {conn_err}")
             retry_count += 1
             if retry_count < max_retries:
                 wait_time = 2 ** retry_count
                 print(f"Retrying in {wait_time} seconds... (attempt {retry_count+1}/{max_retries})")
                 time.sleep(wait_time)
             else:
-                print("Max retries reached. Token generation failed.")
+                print("Max retries reached for ConnectionError. Token generation failed.")
                 return
+        
+        except Exception as e: 
+            print(f"An unexpected error occurred in generate_tokens_from_api: {type(e).__name__} - {e}")
+            import traceback
+            traceback.print_exc()
+            print("Token generation failed due to an unexpected error.")
+            return
+
+    # Fallback if the while loop exits without a 'return' inside
+    print("Token generation ultimately failed after all retries or due to a non-retryable error.")
 
 # The turn_token_into_id function is now imported from speechpipe.py
 # This eliminates duplicate code and ensures consistent behavior
@@ -666,6 +679,10 @@ def stream_audio(audio_buffer):
     if audio_buffer is None or len(audio_buffer) == 0:
         return
     
+    if not SOUNDDEVICE_AVAILABLE:
+        print("Audio playback skipped: sounddevice not available")
+        return
+    
     try:
         # Convert bytes to NumPy array (16-bit PCM)
         audio_data = np.frombuffer(audio_buffer, dtype=np.int16)
@@ -730,7 +747,7 @@ def split_text_into_sentences(text):
     return combined_sentences
 
 def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temperature=TEMPERATURE, 
-                             top_p=TOP_P, max_tokens=MAX_TOKENS, repetition_penalty=None, 
+                     top_p=TOP_P, max_tokens=MAX_TOKENS, repetition_penalty=None, 
                              use_batching=True, max_batch_chars=2500, 
                              output_format: Optional[str] = "wav") -> Tuple[bool, Optional[str]]:
     """
@@ -745,7 +762,7 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
     perf_monitor = PerformanceMonitor()
     
     start_time = time.time()
-
+    
     try:
         all_audio_segments = []
         # For shorter text, use the standard non-batched approach
@@ -812,7 +829,7 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
                         os.remove(temp_file)
                     except Exception as e:
                         print(f"Warning: Could not remove temporary file {temp_file}: {e}")
-
+    
         # Report final performance metrics
         end_time = time.time()
         total_time = end_time - start_time
@@ -822,7 +839,7 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
             duration_generated = total_bytes_generated / (2 * SAMPLE_RATE)
             print(f"Generated {len(all_audio_segments)} audio segments, total {duration_generated:.2f}s audio in {total_time:.2f}s.")
             if total_time > 0:
-                 print(f"Realtime factor: {duration_generated/total_time:.2f}x")
+                print(f"Realtime factor: {duration_generated/total_time:.2f}x")
         else:
             print(f"No audio segments generated. Total time: {total_time:.2f} seconds")
             # If no audio segments were generated, it's a failure, regardless of file creation.
@@ -837,7 +854,6 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
             print(f"ERROR: {error_msg}")
             return False, error_msg
 
-
         # Check if the output file was created and is not empty (beyond just a header)
         if output_file:
             if not os.path.exists(output_file):
@@ -851,13 +867,7 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
                 # Optionally remove empty file: os.remove(output_file)
                 return False, error_msg
             print(f"Successfully generated speech to {output_file}")
-        # This 'elif' is now effectively covered by the 'else' block for 'if all_audio_segments:'
-        # elif not all_audio_segments: # If no output file and no audio segments, it's an issue.
-        #      error_msg = "No audio segments generated and no output file specified."
-        #      print(f"ERROR: {error_msg}")
-        #      return False, error_msg
-
-
+        
         print(f"Total speech generation completed in {total_time:.2f} seconds")
         return True, None # Success
 

@@ -34,19 +34,6 @@ COPY . .
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-# Set environment variables
-ENV ORPHEUS_API_BASE_URL="http://localhost:5000"
-ENV ORPHEUS_API_TIMEOUT=30
-ENV ORPHEUS_PORT=8000
-ENV ORPHEUS_MAX_TOKENS=350
-ENV ORPHEUS_TEMPERATURE=0.1
-ENV ORPHEUS_TOP_P=0.85
-ENV ORPHEUS_SAMPLE_RATE=22050
-# Supabase variables will be passed from the Runpod environment
-ENV SUPABASE_URL=""
-ENV SUPABASE_KEY=""
-ENV SUPABASE_BUCKET="tts-audio"
-
 # Port exposure and command are handled by runpod.toml OR the handler script itself
 # EXPOSE 5005
 # CMD is defined in runpod.toml runtime.command
